@@ -30,9 +30,6 @@ namespace gazebo {
         if (windfield_kdtree) {
             delete windfield_kdtree;
         }
-//        if (windfield_fft_kdtree) { // [ADDED] In case you also want to clean up dynamic KD-tree
-//        delete windfield_fft_kdtree;
-//        }
     }
 
     void GazeboWind3DWorldPlugin::Load(physics::WorldPtr world, sdf::ElementPtr sdf) {
@@ -226,19 +223,6 @@ namespace gazebo {
 
         // Calculate the wind force.
         // Get normal distribution wind strength
-        
-        // This will highlight your "M queries" idea. 
-        int M = static_cast<int>(registered_link_list_.size()); // # links to publish wind for
-        
-        //// [ADDED] Record the start time for measuring performance:
-        //#if GAZEBO_MAJOR_VERSION >= 9
-        //        common::Time loopStart = world_->SimTime();
-        //#else
-        //        common::Time loopStart = world_->GetSimTime();
-        //#endif
-    
-        auto t0 = std::chrono::steady_clock::now();
-        
         if (!use_custom_static_wind_field_ && !use_custom_dynamic_wind_field_) {
             gazebo::msgs::Vector3d* wind_v_ptr = new gazebo::msgs::Vector3d();
             double wind_strength = std::abs(wind_velocity_distribution_(wind_velocity_generator_));
@@ -338,48 +322,22 @@ namespace gazebo {
                 registered_link_wind_publisher_list_[index++]->Publish(wind_msg);
             }
         } else if (use_custom_dynamic_wind_field_) {
-            
-                // We'll add some logging about K, n, M, etc.
-            if (M == 0) return;
-
-            // Example constants:
-            size_t K = 1; // We do 1 nearest neighbor in your code
-            // We'll do a quick debug message about M & K:
-//            gzdbg << "[gazebo_wind3d_world_plugin] Dynamic wind lookups: M="
-//                  << M << " queries, each retrieving K=" << K << " neighbors.\n";
-
+            if (registered_link_list_.size() == 0) {
+                return;
+            }
             int index = 0;
             for (physics::LinkPtr link : registered_link_list_) {
                 ignition::math::Vector3d link_position = link->WorldPose().Pos();
-                const num_t query_pt[3] = {
-                    static_cast<float>(link_position.X()),
-                    static_cast<float>(link_position.Y()),
-                    static_cast<float>(link_position.Z())
-                };
-
-                size_t num_results = K; // 1
+                const num_t query_pt[3] = {(float) link_position.X(), (float) link_position.Y(), (float) link_position.Z()};
+                // ----------------------------------------------------------------
+                // knnSearch():  Perform a search for the N closest points
+                // ----------------------------------------------------------------
+                size_t num_results = 1;
                 std::vector<uint32_t> ret_index(num_results);
                 std::vector<num_t> out_dist_sqr(num_results);
 
-                // Kd-tree search: ~ O(log N)
-                num_results = windfield_fft_kdtree->knnSearch(&query_pt[0], num_results,
-                                                              &ret_index[0], &out_dist_sqr[0]);
-//            if (registered_link_list_.size() == 0) {
-//                return;
-//            }
-//            int index = 0;
-//            for (physics::LinkPtr link : registered_link_list_) {
-//                ignition::math::Vector3d link_position = link->WorldPose().Pos();
-//                const num_t query_pt[3] = {(float) link_position.X(), (float) link_position.Y(), (float) link_position.Z()};
-//                // ----------------------------------------------------------------
-//                // knnSearch():  Perform a search for the N closest points
-//                // ----------------------------------------------------------------
-//                size_t num_results = 1;
-//                std::vector<uint32_t> ret_index(num_results);
-//                std::vector<num_t> out_dist_sqr(num_results);
-//
-//                num_results = windfield_fft_kdtree->knnSearch(&query_pt[0], num_results, &ret_index[0],
-//                        &out_dist_sqr[0]);
+                num_results = windfield_fft_kdtree->knnSearch(&query_pt[0], num_results, &ret_index[0],
+                        &out_dist_sqr[0]);
 
                 // In case of less points in the tree than requested:
                 ret_index.resize(num_results);
@@ -387,11 +345,11 @@ namespace gazebo {
 
                 //std::cout << "knnSearch(): num_results=" << num_results << std::endl;
                 int pt_idx = 0;
-                ignition::math::Vector3d wind_directionB(0, 0, 0);
+                ignition::math::Vector3d wind_direction(0, 0, 0);
                 ignition::math::Vector3d wind_vel;
-                float total_invdistance_sqrB = 0;
+                float total_invdistance_sqr = 0;
                 for (size_t i = 0; i < num_results; i++) {
-                    total_invdistance_sqrB += 1.0f / out_dist_sqr[i];
+                    total_invdistance_sqr += 1.0f / out_dist_sqr[i];
                 }
 #if GAZEBO_MAJOR_VERSION >= 9
                 common::Time time_ = world_->SimTime();
@@ -399,24 +357,12 @@ namespace gazebo {
                 common::Time time_ = world_->GetSimTime();
 #endif                
                 float t = time_.Float();
-                
-                ignition::math::Vector3d wind_directionA(0, 0, 0);
-                float total_invdistance_sqrA = 0.f;
                 for (size_t i = 0; i < num_results; i++) {
-                    total_invdistance_sqrA += 1.f / out_dist_sqr[i];
-                }
-            
-                for (size_t i = 0; i < num_results; i++) {
-                    
-                    ignition::math::Vector3d wind_vel(0,0,0);
-                    int pt_idx = ret_index[i];
-                    int num_coeffs = static_cast<int>(pt_cloud_fftfunc._freq[pt_idx].size());
-                    // Summation O(n)
-//                    wind_vel.X() = 0;
-//                    wind_vel.Y() = 0;
-//                    wind_vel.Z() = 0;
-//                    pt_idx = ret_index[i];
-//                    int num_coeffs = pt_cloud_fftfunc._freq[pt_idx].size();
+                    wind_vel.X() = 0;
+                    wind_vel.Y() = 0;
+                    wind_vel.Z() = 0;
+                    pt_idx = ret_index[i];
+                    int num_coeffs = pt_cloud_fftfunc._freq[pt_idx].size();
                     const auto &f = pt_cloud_fftfunc._freq[pt_idx].data();
                     const auto &a_k = pt_cloud_fftfunc._real[pt_idx].data();
                     const auto &b_k = pt_cloud_fftfunc._imag[pt_idx].data();
@@ -437,49 +383,29 @@ namespace gazebo {
 //                            wind_vel.Y() << ", " <<
 //                            wind_vel.Z() << ")" << std::endl;
 
-                    wind_directionA.X() +=
-                            (wind_vel.X()) * (1.0f / out_dist_sqr[i]) / total_invdistance_sqrA;
-                    wind_directionA.Y() +=
-                            (wind_vel.Y()) * (1.0f / out_dist_sqr[i]) / total_invdistance_sqrA;
-                    wind_directionA.Z() +=
-                            (wind_vel.Z()) * (1.0f / out_dist_sqr[i]) / total_invdistance_sqrA;
+                    wind_direction.X() +=
+                            (wind_vel.X()) * (1.0f / out_dist_sqr[i]) / total_invdistance_sqr;
+                    wind_direction.Y() +=
+                            (wind_vel.Y()) * (1.0f / out_dist_sqr[i]) / total_invdistance_sqr;
+                    wind_direction.Z() +=
+                            (wind_vel.Z()) * (1.0f / out_dist_sqr[i]) / total_invdistance_sqr;
 
                 }
 
-                double wind_strength = wind_directionA.Length();
+                double wind_strength = wind_direction.Length();
                 if (wind_strength > wind_velocity_max_) {
-                    wind_directionA *= wind_velocity_max_ / wind_strength;
+                    wind_direction *= wind_velocity_max_ / wind_strength;
                 }
-//                wind_direction *= 2;
                 // Get normal distribution wind direction
                 gazebo::msgs::Vector3d* wind_v_ptr = new gazebo::msgs::Vector3d();
-                wind_v_ptr->set_x(wind_directionA.X());
-                wind_v_ptr->set_y(wind_directionA.Y());
-                wind_v_ptr->set_z(wind_directionA.Z());
+                wind_v_ptr->set_x(wind_direction.X());
+                wind_v_ptr->set_y(wind_direction.Y());
+                wind_v_ptr->set_z(wind_direction.Z());
                 wind_msg.set_frame_id(frame_id_);
                 wind_msg.set_time_usec(now.Double() * 1e6);
                 wind_msg.set_allocated_velocity(wind_v_ptr);
                 registered_link_wind_publisher_list_[index++]->Publish(wind_msg);
             }
-            
-            auto t1 = std::chrono::steady_clock::now();
-            double elapsed_us =
-                std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-
-//            gzdbg << "[gazebo_wind3d_world_plugin] wind queries took "
-//                  << elapsed_us << " microseconds this step.\n";
-//            
-//            // [ADDED] Record end time and compute elapsed microseconds:
-        //#if GAZEBO_MAJOR_VERSION >= 9
-        //        common::Time loopEnd = world_->SimTime();
-        //#else
-        //        common::Time loopEnd = world_->GetSimTime();
-        //#endif
-        //        double elapsedMicro = (loopEnd - loopStart).Double() * 1.0e6; // convert s -> microseconds
-//
-//        // [ADDED] Print or store it
-//        gzdbg << "[gazebo_wind3d_world_plugin] wind queries took ~" 
-//              << elapsedMicro << " microseconds this step.\n";
         }
     }
 
@@ -520,13 +446,6 @@ namespace gazebo {
             //        pt_cloud_vec3._data[0][3] << ")" << std::endl;
             index++;
         }
-        
-        //For checking the memory usage:
-//        const size_t bytes_per_point_static = sizeof (pt_cloud_vec3.pts[0]) + sizeof (pt_cloud_vec3._data[0]);
-//        double mem_MB = (num_points * bytes_per_point_static) / (1024.0 * 1024.0);
-//        gzwarn << "[gazebo_wind3d_world_plugin] Static wind memory ≈ "
-//                << mem_MB << " MB for " << num_points << " points.\n";
-//        
         gzdbg << "[gazebo_wind3d_world_plugin] Average sample position is (x,y,z)=(" <<
                 pt_avg[0] << ", " << pt_avg[1] << pt_avg[2] << ")." << std::endl;
         //dump_mem_usage();
@@ -581,8 +500,6 @@ namespace gazebo {
     }
 
     void GazeboWind3DWorldPlugin::ReadCustomDynamicWindField(std::string & wind_field_datafile_path) {
-//        std::cout << "[DYN‑TEST] entered ReadCustomDynamicWindField()\n";
-
         bool csvReadOK;
         std::vector<std::vector<double>> csv_data;
         csvReadOK = readCSV(wind_field_datafile_path, csv_data);
@@ -645,15 +562,6 @@ namespace gazebo {
             //        pt_cloud_vec3._data[0][3] << ")" << std::endl;
             pt_index++;
         }
-        //for checking memory usage:
-//        const size_t bytes_per_coeff   = sizeof(float)*3 /*freq*/ + sizeof(float)*3 /*real*/ + sizeof(float)*3 /*imag*/;
-//        const size_t bytes_per_point_dyn = sizeof(pt_cloud_fftfunc.pts[0]) + num_coeffs*bytes_per_coeff;
-//        double mem_MB = (num_points * bytes_per_point_dyn) / (1024.0*1024.0);
-//        std::cout << "[MEM‑TEST] about to print memory usage\n";
-//
-//        gzwarn << "[gazebo_wind3d_world_plugin] Dynamic wind memory ≈ "
-//              << mem_MB << " MB (" << num_coeffs << " coeffs × "
-//              << num_points << " points).\n";
         gzdbg << "[gazebo_wind3d_world_plugin] Average sample position is (x,y,z)=(" <<
                 pt_avg[0] << ", " << pt_avg[1] << pt_avg[2] << ")." << std::endl;
         //dump_mem_usage();
